@@ -1,0 +1,28 @@
+{
+  "name": "Трекер робочого часу",
+  "short_name": "Трекер",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#FFF6EA",
+  "theme_color": "#FFF6EA",
+  "lang": "uk",
+  "icons": [
+    {
+      "src": "icon-64.png",
+      "sizes": "64x64",
+      "type": "image/png"
+    },
+    {
+      "src": "icon-180.jpg",
+      "sizes": "180x180",
+      "type": "image/jpeg"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

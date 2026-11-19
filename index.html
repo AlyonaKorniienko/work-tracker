@@ -299,6 +299,7 @@
   let sync = { st: 'idle', at: null, readAt: 0, dirty: false, timer: null, err: '' };
   let remoteReady = false;
   let otherRunning = null;
+  let closedElsewhere = null;
 
   async function apiOnce(payload) {
     const res = await fetch(SYNC.url, {
@@ -376,13 +377,23 @@
     if (Array.isArray(c.categories) && c.categories.length) state.categories = c.categories;
     if (c.goals) state.goals = c.goals;
     if (c.pick) state.pick = c.pick;
+    /* наш відлік уже закрито на іншому пристрої: проміжок записано, тут його тримати нічого */
+    if (state.running && state.running.runId &&
+        state.sessions.some(s => s.runId === state.running.runId)) {
+      closedElsewhere = state.running;
+      state.running = null;
+    }
+
     /* таймер уже йде на іншому пристрої — не підміняємо свій, але попереджаємо */
     if (state.running && c.running && c.running.currentStart &&
         c.running.currentStart !== state.running.currentStart) {
       otherRunning = c.running;
     } else {
       otherRunning = null;
-      if (!state.running && c.running) state.running = c.running;
+      if (!state.running && c.running && !(c.running.runId &&
+          state.sessions.some(s => s.runId === c.running.runId))) {
+        state.running = c.running;
+      }
     }
   }
 
@@ -818,6 +829,11 @@
           ${r ? `${running ? 'Йде відлік' : 'Пауза'} · ${esc(activeCat ? activeCat.name : '')}${activeTask ? ' · ' + esc(activeTask.name) : ''}`
               : 'Таймер зупинено'}
         </div>
+
+        ${closedElsewhere ? `<div class="verdict good" style="margin:0 0 12px">
+          Цей відлік зупинено на іншому пристрої, проміжок уже записано.
+          <button class="btn small" data-act="dismissclosed" style="margin-top:8px">Зрозуміло</button>
+        </div>` : ''}
 
         ${otherRunning ? `<div class="verdict warn" style="margin:0 0 12px">
           Таймер іде ще й на іншому пристрої${(() => {
@@ -1475,7 +1491,8 @@
   }
 
   function startTimer() {
-    state.running = { catId: state.pick.catId, taskId: state.pick.taskId, segments: [], currentStart: Date.now() };
+    /* runId — паспорт відліку: за ним видно, чи його вже закрили на іншому пристрої */
+    state.running = { runId: uid(), catId: state.pick.catId, taskId: state.pick.taskId, segments: [], currentStart: Date.now() };
     render(); save();
   }
 
@@ -1490,9 +1507,14 @@
       if (!quiet) { toast('Проміжок коротший за 20 секунд — не записую'); render(); save(); }
       return;
     }
+    /* цей відлік уже закрито на іншому пристрої — другого запису не робимо */
+    if (r.runId && state.sessions.some(s => s.runId === r.runId)) {
+      if (!quiet) { toast('Цей проміжок уже записано з іншого пристрою'); render(); save(); }
+      return;
+    }
     const c = cat(r.catId), t = task(r.catId, r.taskId);
     state.sessions.push({
-      id: uid(), catId: r.catId, taskId: r.taskId,
+      id: uid(), runId: r.runId || null, catId: r.catId, taskId: r.taskId,
       catName: c ? c.name : '', taskName: t ? t.name : '',
       segments: segs, duration: dur
     });
@@ -1586,6 +1608,7 @@
         startTimer();
       }
       if (a === 'dismissother') { otherRunning = null; render(); return; }
+      if (a === 'dismissclosed') { closedElsewhere = null; render(); return; }
       if (a === 'switch') {
         if (!state.pick.taskId) { toast('Спочатку обери задачу'); return; }
         const r = state.running;

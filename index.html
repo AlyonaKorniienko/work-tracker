@@ -112,6 +112,9 @@
   #app .chip[aria-pressed="true"] { background: var(--soft); border-color: var(--lav); color: var(--plum); font-weight: 700; }
   #app .chip[disabled] { opacity: .5; cursor: default; }
   #app .chip.ghost { border-style: dashed; color: var(--muted); background: transparent; }
+  /* задача, на якій зараз іде відлік */
+  #app .chip.live { box-shadow: inset 0 0 0 1.5px var(--go, #4FA88B); }
+  #app .chip.live::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #4FA88B; margin-left: 2px; }
 
   #app .timerbox { display: flex; align-items: center; gap: 12px; margin: 8px 0 2px; }
   #app .readout {
@@ -295,6 +298,7 @@
   const hasLocal = !!(window.storage && typeof window.storage.get === 'function') || lsOk;
   let sync = { st: 'idle', at: null, readAt: 0, dirty: false, timer: null, err: '' };
   let remoteReady = false;
+  let otherRunning = null;
 
   async function apiOnce(payload) {
     const res = await fetch(SYNC.url, {
@@ -372,7 +376,14 @@
     if (Array.isArray(c.categories) && c.categories.length) state.categories = c.categories;
     if (c.goals) state.goals = c.goals;
     if (c.pick) state.pick = c.pick;
-    if (!state.running && c.running) state.running = c.running;
+    /* таймер уже йде на іншому пристрої — не підміняємо свій, але попереджаємо */
+    if (state.running && c.running && c.running.currentStart &&
+        c.running.currentStart !== state.running.currentStart) {
+      otherRunning = c.running;
+    } else {
+      otherRunning = null;
+      if (!state.running && c.running) state.running = c.running;
+    }
   }
 
   async function cloudLoad() {
@@ -773,15 +784,19 @@
     const activeCat = r ? cat(r.catId) : c;
     const activeTask = r ? task(r.catId, r.taskId) : task(state.pick.catId, state.pick.taskId);
 
+    /* вибір лишається доступним і під час відліку: інакше задачу не перемкнути */
+    const pickedCat = state.pick.catId, pickedTask = state.pick.taskId;
+    const drift = !!(r && (r.catId !== pickedCat || r.taskId !== pickedTask));
+
     const catChips = state.categories.map(x => `
-      <button class="chip" data-pickcat="${x.id}" aria-pressed="${(r ? r.catId : state.pick.catId) === x.id}" ${r ? 'disabled' : ''}>
+      <button class="chip ${r && r.catId === x.id ? 'live' : ''}" data-pickcat="${x.id}" aria-pressed="${pickedCat === x.id}">
         <span class="dot" style="background:${x.color}"></span>${esc(x.name)}
       </button>`).join('');
 
-    const list = (r ? cat(r.catId) : c);
+    const list = cat(pickedCat) || c;
     const taskChips = (list ? list.tasks : []).map(t => `
-      <button class="chip" data-picktask="${t.id}" aria-pressed="${(r ? r.taskId : state.pick.taskId) === t.id}" ${r ? 'disabled' : ''}>${esc(t.name)}</button>`).join('')
-      + (r ? '' : `<button class="chip ghost" data-quickadd="1">+ нова задача</button>`);
+      <button class="chip ${r && r.taskId === t.id && r.catId === list.id ? 'live' : ''}" data-picktask="${t.id}" aria-pressed="${pickedTask === t.id}">${esc(t.name)}</button>`).join('')
+      + `<button class="chip ghost" data-quickadd="1">+ нова задача</button>`;
 
     const now = Date.now();
     const dayT = sumBetween(startOfDay(now), now + 1000);
@@ -804,8 +819,25 @@
               : 'Таймер зупинено'}
         </div>
 
+        ${otherRunning ? `<div class="verdict warn" style="margin:0 0 12px">
+          Таймер іде ще й на іншому пристрої${(() => {
+            const oc = cat(otherRunning.catId), ot = task(otherRunning.catId, otherRunning.taskId);
+            const nm = (ot && ot.name) || (oc && oc.name);
+            return nm ? ' — ' + esc(nm) + ', з ' + clock(otherRunning.currentStart) : '';
+          })()}.
+          Зупини його там, інакше цей час порахується двічі.
+          <button class="btn small" data-act="dismissother" style="margin-top:8px">Зрозуміло</button>
+        </div>` : ''}
+
+        ${drift ? `<div class="verdict good" style="margin:0 0 12px">
+          Зараз рахується <b>${esc((activeTask && activeTask.name) || (activeCat && activeCat.name) || '')}</b>.
+          Перемкнути — запише цей проміжок і одразу почне новий, без паузи в обліку.
+        </div>` : ''}
+
         <div class="actions">
           ${!r ? `<button class="btn primary" data-act="start">Почати</button>`
+               : drift ? `<button class="btn primary" data-act="switch">Перемкнути сюди</button>
+                  <button class="btn" data-act="stop">Зупинити і записати</button>`
                : `${running ? `<button class="btn primary" data-act="pause">Пауза</button>`
                             : `<button class="btn primary" data-act="resume">Продовжити</button>`}
                   <button class="btn" data-act="stop">Зупинити і записати</button>
@@ -1442,19 +1474,29 @@
     }
   }
 
-  function stopAndSave() {
+  function startTimer() {
+    state.running = { catId: state.pick.catId, taskId: state.pick.taskId, segments: [], currentStart: Date.now() };
+    render(); save();
+  }
+
+  /* quiet — перемикання: запис без окремого повідомлення й без зайвого рендеру */
+  function stopAndSave(quiet) {
     const r = state.running;
     if (!r) return;
     const segs = r.segments.concat(r.currentStart ? [{ s: r.currentStart, e: Date.now() }] : []);
     const dur = segs.reduce((a, g) => a + (g.e - g.s), 0);
     state.running = null;
-    if (dur < 20000) { toast('Проміжок коротший за 20 секунд — не записую'); render(); save(); return; }
+    if (dur < 20000) {
+      if (!quiet) { toast('Проміжок коротший за 20 секунд — не записую'); render(); save(); }
+      return;
+    }
     const c = cat(r.catId), t = task(r.catId, r.taskId);
     state.sessions.push({
       id: uid(), catId: r.catId, taskId: r.taskId,
       catName: c ? c.name : '', taskName: t ? t.name : '',
       segments: segs, duration: dur
     });
+    if (quiet) return;
     toast('Записано ' + hrs(dur));
     render(); save();
   }
@@ -1541,8 +1583,19 @@
       const a = b.dataset.act;
       if (a === 'start') {
         if (!state.pick.taskId) { toast('Спочатку обери задачу'); return; }
-        state.running = { catId: state.pick.catId, taskId: state.pick.taskId, segments: [], currentStart: Date.now() };
-        render(); save();
+        startTimer();
+      }
+      if (a === 'dismissother') { otherRunning = null; render(); return; }
+      if (a === 'switch') {
+        if (!state.pick.taskId) { toast('Спочатку обери задачу'); return; }
+        const r = state.running;
+        if (!r) { startTimer(); return; }
+        const same = r.catId === state.pick.catId && r.taskId === state.pick.taskId;
+        if (same) { toast('Це та сама задача'); return; }
+        stopAndSave(true);
+        startTimer();
+        const c = cat(state.pick.catId), tk = task(state.pick.catId, state.pick.taskId);
+        toast('Перемкнуто на ' + ((tk && tk.name) || (c && c.name) || 'нову задачу'));
       }
       if (a === 'pause') {
         const r = state.running;

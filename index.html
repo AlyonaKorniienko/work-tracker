@@ -293,7 +293,7 @@
     try { localStorage.setItem(TKEY, t); } catch (e) {}
   }
   const hasLocal = !!(window.storage && typeof window.storage.get === 'function') || lsOk;
-  let sync = { st: 'idle', at: null, dirty: false, timer: null, err: '' };
+  let sync = { st: 'idle', at: null, readAt: 0, dirty: false, timer: null, err: '' };
   let remoteReady = false;
 
   async function apiOnce(payload) {
@@ -382,6 +382,7 @@
       mergeRemote(d);
       remoteReady = true;
       sync.at = Date.now();
+      sync.readAt = Date.now();
       setSync('ok');
       return true;
     } catch (e) {
@@ -390,9 +391,13 @@
     }
   }
 
+  /* перед записом звіряємося з таблицею, якщо давно не читали:
+     інакше копія, що висіла у фоні, затерла б роботу з іншого пристрою */
+  const STALE = 60000;
+
   async function cloudSave() {
     if (sync.timer) { clearTimeout(sync.timer); sync.timer = null; }
-    if (!remoteReady) {
+    if (!remoteReady || (Date.now() - (sync.readAt || 0)) > STALE) {
       const got = await cloudLoad();
       if (!got) {
         sync.dirty = true;
@@ -1750,6 +1755,22 @@
 
     setInterval(() => { if (SYNC.token && sync.dirty) cloudSave(); }, 45000);
     window.addEventListener('online', () => { if (SYNC.token && sync.dirty) cloudSave(); });
+
+    /* повернулися до трекера після іншого пристрою — підтягуємо свіже */
+    let refreshing = false;
+    async function refreshOnReturn() {
+      if (!SYNC.token || refreshing) return;
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - (sync.readAt || 0) < 20000) return;
+      refreshing = true;
+      try {
+        if (sync.dirty) { await cloudSave(); }
+        else if (await cloudLoad()) { render(); }
+      } finally { refreshing = false; }
+    }
+    document.addEventListener('visibilitychange', refreshOnReturn);
+    window.addEventListener('focus', refreshOnReturn);
+    window.addEventListener('pageshow', refreshOnReturn);
   })();
 })();
 </script>
